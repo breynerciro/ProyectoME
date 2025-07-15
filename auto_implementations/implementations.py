@@ -184,6 +184,15 @@ class MySeries:
                 result.append(False)
         return MySeries(result, self.index, self.name)
     
+    def __len__(self):
+        """
+        Devuelve la longitud de la serie
+        
+        Retorna:
+        - Número de elementos en la serie
+        """
+        return len(self.data)
+    
     def fillna(self, value=None, method=None, inplace=False):
         """
         Rellena valores nulos en la serie
@@ -299,7 +308,34 @@ class MyDataFrame:
             # Usar el índice de la primera serie si no se proporciona uno
             first_col = next(iter(self._data.values()))
             self.index = first_col.index
+
+    def __len__(self):
+        """Devuelve la longitud del DataFrame"""
+        return len(self.index)
     
+    def __setitem__(self, key, value):
+        """
+        Permite asignación de columnas usando df[columna] = valor
+        
+        Parámetros:
+        - key: nombre de la columna
+        - value: MySeries o lista de valores
+        """
+        if isinstance(value, MySeries):
+            # Si es una MySeries, usarla directamente
+            self._data[key] = value
+        elif isinstance(value, list):
+            # Si es una lista, convertir a MySeries
+            self._data[key] = MySeries(value, self.index, key)
+        else:
+            # Para valores escalares, crear una serie con el mismo valor
+            scalar_data = [value] * len(self.index)
+            self._data[key] = MySeries(scalar_data, self.index, key)
+        
+        # Actualizar la lista de columnas si es una columna nueva
+        if key not in self.columns:
+            self.columns.append(key)
+
     def __getitem__(self, key):
         """
         Acceso a columnas o filas del DataFrame
@@ -347,6 +383,19 @@ class MyDataFrame:
         
         return None
     
+    def copy(self):
+        """
+        Crea una copia del DataFrame
+        
+        Retorna:
+        - Nueva instancia de MyDataFrame
+        """
+        new_data = {}
+        for col, series in self._data.items():
+            new_data[col] = MySeries(series.data.copy(), series.index.copy(), col)
+        
+        return MyDataFrame(new_data, self.index.copy(), self.columns.copy())
+
     def set_index(self, column):
         """
         Establece una columna como índice
@@ -376,17 +425,29 @@ class MyDataFrame:
         new_index = list(range(len(self.index)))
         new_data = {}
         
+        # Filtrar solo columnas que existen en _data
+        valid_columns = []
         for col in self.columns:
-            new_data[col] = MySeries(self._data[col].data, new_index, col)
+            if col in self._data and self._data[col] is not None:
+                try:
+                    new_data[col] = MySeries(self._data[col].data, new_index, col)
+                    valid_columns.append(col)
+                except Exception as e:
+                    print(f"[Warning] Error procesando columna '{col}': {e}")
+            else:
+                print(f"[Warning] Columna '{col}' no encontrada en _data, omitiendo...")
         
-        # Añadir el índice anterior como una columna si no es numérico consecutivo
-        if not all(isinstance(idx, int) and idx == i for i, idx in enumerate(self.index)):
-            new_data['Timestamp'] = MySeries(self.index, new_index, 'Timestamp')
-            new_columns = ['Timestamp'] + self.columns
-        else:
-            new_columns = self.columns
+        # Actualizar la lista de columnas válidas
+        self.columns = valid_columns
         
-        return MyDataFrame(new_data, new_index, new_columns)
+        # Añadir el índice anterior como columna si no es numérico secuencial
+        if (self.index and 
+            not all(isinstance(idx, int) and idx == i for i, idx in enumerate(self.index))):
+            new_data['index'] = MySeries(self.index, new_index, 'index')
+            valid_columns = ['index'] + valid_columns
+        
+        return MyDataFrame(new_data, new_index, valid_columns)
+
     
     def sort_values(self, by):
         """
@@ -457,6 +518,16 @@ class MyDataFrame:
         
         return MyDataFrame(new_data, new_index, self.columns)
     
+    def groupby(self, by):
+        """
+        Agrupa el DataFrame por una o más columnas
+        """
+        print(f"[DEBUG] Iniciando groupby con: {by}")
+        print(f"[DEBUG] Columnas disponibles antes de groupby: {self.columns}")
+        print(f"[DEBUG] Datos disponibles: {list(self._data.keys())}")
+        
+        return MyGroupBy(self, by)
+    
     def dropna(self):
         """
         Elimina filas con valores nulos
@@ -489,22 +560,114 @@ class MyDataFrame:
     
     def isnull(self):
         """
-        Comprueba valores nulos
-        
-        Retorna:
-        - DataFrame de booleanos indicando valores nulos
+        Comprueba valores nulos y devuelve un DataFrame compatible
         """
-        new_data = {}
+        null_data = {}
         
         for col in self.columns:
-            null_values = []
-            for val in self._data[col].data:
-                is_null = val is None or (isinstance(val, float) and math.isnan(val))
-                null_values.append(is_null)
-            
-            new_data[col] = MySeries(null_values, self.index, col)
+            if col in self._data:
+                null_values = []
+                for val in self._data[col].data:
+                    is_null = val is None or (isinstance(val, float) and math.isnan(val))
+                    null_values.append(is_null)
+                null_data[col] = MySeries(null_values, self.index, col)
         
-        return MyDataFrame(new_data, self.index, self.columns)
+        result_df = MyDataFrame(null_data, self.index, list(null_data.keys()))
+        
+        # Crear una clase que extienda el DataFrame con método any()
+        class DataFrameWithAny(MyDataFrame):
+            def __init__(self, data, index, columns):
+                super().__init__(data, index, columns)
+            
+            @property
+            def values(self):
+                """
+                Devuelve los valores como una estructura compatible con NumPy
+                """
+                if not self._data or not self.columns:
+                    return []
+                
+                result = []
+                for i in range(len(self.index)):
+                    row = []
+                    for col in self.columns:
+                        if col in self._data and i < len(self._data[col].data):
+                            row.append(self._data[col].data[i])
+                        else:
+                            row.append(None)
+                    result.append(row)
+                
+                # Crear una clase que simule el comportamiento de NumPy array
+                class ArrayLike:
+                    def __init__(self, data):
+                        self.data = data
+                    
+                    def __getitem__(self, key):
+                        if isinstance(key, tuple):
+                            # Manejo de indexado multidimensional
+                            row_slice, col_slice = key
+                            
+                            # Aplicar slice de filas
+                            if isinstance(row_slice, slice):
+                                start = row_slice.start or 0
+                                stop = row_slice.stop or len(self.data)
+                                step = row_slice.step or 1
+                                row_indices = list(range(start, stop, step))
+                            else:
+                                row_indices = [row_slice] if isinstance(row_slice, int) else row_slice
+                            
+                            # Aplicar slice de columnas
+                            if isinstance(col_slice, slice):
+                                start = col_slice.start or 0
+                                stop = col_slice.stop or len(self.data[0]) if self.data else 0
+                                step = col_slice.step or 1
+                                col_indices = list(range(start, stop, step))
+                            else:
+                                col_indices = [col_slice] if isinstance(col_slice, int) else col_slice
+                            
+                            # Extraer datos
+                            result = []
+                            for row_idx in row_indices:
+                                if row_idx < len(self.data):
+                                    row = []
+                                    for col_idx in col_indices:
+                                        if col_idx < len(self.data[row_idx]):
+                                            row.append(self.data[row_idx][col_idx])
+                                        else:
+                                            row.append(None)
+                                    result.append(row)
+                            
+                            return result
+                        else:
+                            # Indexado simple
+                            return self.data[key]
+                    
+                    def __len__(self):
+                        return len(self.data)
+                    
+                    def __iter__(self):
+                        return iter(self.data)
+                
+                return ArrayLike(result)
+
+    
+    def debug_structure(self):
+        """
+        Método de depuración para verificar la estructura del DataFrame
+        """
+        print(f"Columnas declaradas: {self.columns}")
+        print(f"Columnas en _data: {list(self._data.keys())}")
+        print(f"Longitud del índice: {len(self.index)}")
+        
+        # Verificar inconsistencias
+        missing_in_data = [col for col in self.columns if col not in self._data]
+        extra_in_data = [col for col in self._data.keys() if col not in self.columns]
+        
+        if missing_in_data:
+            print(f"⚠️  Columnas faltantes en _data: {missing_in_data}")
+        if extra_in_data:
+            print(f"ℹ️  Columnas extra en _data: {extra_in_data}")
+
     
     @property
     def values(self):
@@ -538,57 +701,71 @@ class MyDataFrame:
     def read_csv(filepath, parse_dates=None, date_parser=None):
         """
         Lee un archivo CSV y devuelve un DataFrame
-        
-        Parámetros:
-        - filepath: ruta del archivo
-        - parse_dates: lista de índices de columnas a parsear como fechas
-        - date_parser: función para parsear fechas
-        
-        Retorna:
-        - DataFrame con los datos del CSV
         """
         data = {}
-        index = []
         
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 headers = next(reader)
                 
+                print(f"[DEBUG] Headers encontrados: {headers}")
+                
+                # Limpiar headers
+                clean_headers = [header.strip() for header in headers]
+                
                 # Inicializar columnas
-                for header in headers:
+                for header in clean_headers:
                     data[header] = []
                 
-                # Leer datos
+                # Leer datos fila por fila
+                row_count = 0
                 for row in reader:
+                    row_count += 1
                     for i, value in enumerate(row):
-                        if i < len(headers):  # Asegurarse de no exceder los headers
-                            header = headers[i]
+                        if i < len(clean_headers):
+                            header = clean_headers[i]
                             
                             # Convertir fechas si es necesario
                             if parse_dates and i in parse_dates and date_parser:
                                 try:
                                     parsed_value = date_parser(value)
                                     data[header].append(parsed_value)
-                                except:
+                                except Exception as e:
+                                    print(f"[WARNING] Error parseando fecha '{value}': {e}")
                                     data[header].append(None)
                             else:
-                                # Intentar convertir a número
-                                try:
-                                    numeric_value = float(value)
-                                    # Convertir a entero si es posible
-                                    if numeric_value.is_integer():
-                                        numeric_value = int(numeric_value)
-                                    data[header].append(numeric_value)
-                                except:
-                                    data[header].append(value)
-            
-            # Crear DataFrame
-            return MyDataFrame(data, columns=headers)
+                                # Procesar valores
+                                if value.strip() == '' or value.strip().lower() == 'nan':
+                                    data[header].append(None)
+                                else:
+                                    try:
+                                        # Intentar convertir a número
+                                        if '.' in value or 'e' in value.lower():
+                                            numeric_value = float(value)
+                                        else:
+                                            numeric_value = int(value)
+                                        data[header].append(numeric_value)
+                                    except ValueError:
+                                        # Mantener como string
+                                        data[header].append(value.strip())
+                
+                print(f"[DEBUG] Filas procesadas: {row_count}")
+                print(f"[DEBUG] Columnas con datos: {list(data.keys())}")
+                
+                # Verificar que hay datos
+                if not data or all(len(values) == 0 for values in data.values()):
+                    print("[ERROR] No se encontraron datos en el archivo")
+                    return MyDataFrame()
+                
+                # Crear DataFrame
+                return MyDataFrame(data, columns=clean_headers)
         
         except Exception as e:
-            print(f"Error al leer el archivo CSV: {e}")
+            print(f"[ERROR] Error al leer el archivo CSV: {e}")
             return MyDataFrame()
+
+
 
 class MyGrouper:
     def __init__(self, key, freq):
@@ -605,84 +782,97 @@ class MyGrouper:
 class MyGroupBy:
     def __init__(self, df, by):
         """
-        Inicializa un objeto GroupBy
-        
-        Parámetros:
-        - df: DataFrame a agrupar
-        - by: columna o lista de columnas para agrupar
+        Inicializa un objeto GroupBy con mejor manejo de datos
         """
         self.df = df
         self.by = by
         self.groups = self._create_groups()
+
+        print(f"[DEBUG] MyGroupBy inicializado con {len(self.groups)} grupos")
     
     def _create_groups(self):
-        """
-        Crea los grupos según la columna especificada
-        
-        Retorna:
-        - Diccionario de grupos
-        """
+        """Crea los grupos según la columna especificada"""
         groups = defaultdict(list)
         
         if isinstance(self.by, list) and len(self.by) == 1 and isinstance(self.by[0], MyGrouper):
-            # Caso especial para pd.Grouper
             grouper = self.by[0]
             key_col = grouper.key
             
-            if grouper.freq == 'D':
-                # Agrupar por día
-                for i, timestamp in enumerate(self.df.index):
-                    # Extraer solo la fecha (sin hora)
-                    if hasattr(timestamp, 'date'):
-                        date_key = timestamp.date()
-                        groups[date_key].append(i)
-                    elif isinstance(timestamp, datetime.datetime):
-                        date_key = timestamp.date()
-                        groups[date_key].append(i)
-        else:
-            # Agrupar por columna normal
-            by_col = self.by[0] if isinstance(self.by, list) else self.by
+            print(f"[DEBUG] Agrupando por columna: {key_col}")
             
-            for i, value in enumerate(self.df[by_col].data):
-                groups[value].append(i)
+            if key_col in self.df._data:
+                if grouper.freq == 'D':
+                    for i, timestamp in enumerate(self.df._data[key_col].data):
+                        if timestamp is not None:
+                            try:
+                                if hasattr(timestamp, 'date'):
+                                    date_key = timestamp.date()
+                                elif isinstance(timestamp, datetime.datetime):
+                                    date_key = timestamp.date()
+                                else:
+                                    # Intentar parsear string
+                                    if isinstance(timestamp, str):
+                                        dt = datetime.datetime.strptime(timestamp, '%Y-%m-%d')
+                                        date_key = dt.date()
+                                    else:
+                                        continue
+                                
+                                groups[date_key].append(i)
+                            except Exception as e:
+                                print(f"[WARNING] Error procesando timestamp {timestamp}: {e}")
+                                continue
+            else:
+                print(f"[WARNING] Columna '{key_col}' no encontrada para agrupación")
         
+        print(f"[DEBUG] Se crearon {len(groups)} grupos")
         return groups
+
     
     def first(self):
         """
         Devuelve el primer valor de cada grupo
-        
-        Retorna:
-        - DataFrame con los primeros valores de cada grupo
         """
+        if not self.groups:
+            print("[WARNING] No hay grupos para procesar")
+            return MyDataFrame()
+        
         new_data = {}
         new_index = []
+        
+        # Inicializar columnas basándose en datos reales
+        for col in self.df._data.keys():
+            new_data[col] = []
         
         for group_key, indices in self.groups.items():
             if indices:
                 first_idx = indices[0]
                 new_index.append(group_key)
                 
-                for col in self.df.columns:
-                    if col not in new_data:
-                        new_data[col] = []
-                    new_data[col].append(self.df._data[col].data[first_idx])
+                for col in self.df._data.keys():
+                    if first_idx < len(self.df._data[col].data):
+                        new_data[col].append(self.df._data[col].data[first_idx])
+                    else:
+                        new_data[col].append(None)
         
         # Convertir listas a series
         for col in new_data:
             new_data[col] = MySeries(new_data[col], new_index, col)
         
-        return MyDataFrame(new_data, new_index, self.df.columns)
+        result = MyDataFrame(new_data, new_index, list(new_data.keys()))
+        print(f"[DEBUG] Resultado de first(): {result.shape} con columnas {result.columns}")
+        
+        return result
     
     def reset_index(self):
         """
         Resetea el índice después de agrupar
-        
-        Retorna:
-        - DataFrame con índice reseteado
         """
         result = self.first()
-        return result.reset_index()
+        if result.shape[0] > 0:
+            return result.reset_index()
+        else:
+            print("[WARNING] No hay datos para resetear índice")
+            return result
 
 # ====================== MATPLOTLIB IMPLEMENTACIÓN ======================
 class MyPyPlot:
@@ -717,31 +907,41 @@ class MyPyPlot:
     @staticmethod
     def plot(x, y=None, color=None, label=None):
         """
-        Dibuja una línea
+        Dibuja una línea (versión mejorada)
         
         Parámetros:
         - x: valores del eje x o valores y si y no se proporciona
         - y: valores del eje y
         - color: color de la línea
         - label: etiqueta para la leyenda
-        
-        Retorna:
-        - Objeto línea
         """
         if y is None:
             y = x
             x = list(range(len(y)))
         
-        print(f"[Matplotlib] Dibujando línea: color={color}, etiqueta={label}")
+        # Extraer datos de MySeries si es necesario
         if hasattr(y, 'data'):
-            y_data = y.data  # Si es una serie de pandas
+            y_data = y.data
         else:
             y_data = y
-            
-        if len(y_data) > 5:
-            print(f"[Matplotlib] Primeros 5 puntos: {list(zip(x[:5], y_data[:5]))}")
+        
+        if hasattr(x, 'data'):
+            x_data = x.data
         else:
-            print(f"[Matplotlib] Puntos: {list(zip(x, y_data))}")
+            x_data = x
+        
+        print(f"[Matplotlib] Dibujando línea: color={color}, etiqueta={label}")
+        
+        # Verificar que tenemos datos
+        if len(y_data) == 0:
+            print("[Matplotlib] No hay datos para graficar")
+            return MyLine()
+        
+        # Mostrar información de los datos
+        if len(y_data) > 5:
+            print(f"[Matplotlib] Primeros 5 puntos: {list(zip(x_data[:5], y_data[:5]))}")
+        else:
+            print(f"[Matplotlib] Puntos: {list(zip(x_data, y_data))}")
         
         return MyLine()
     
@@ -927,7 +1127,7 @@ class MyRandomForestRegressor:
     
     def score(self, X, y):
         """
-        Calcula el coeficiente de determinación R^2
+        Calcula el coeficiente de determinación R^2 (versión corregida)
         
         Parámetros:
         - X: características
@@ -938,16 +1138,35 @@ class MyRandomForestRegressor:
         """
         predictions = self.predict(X)
         
+        # Aplanar y para manejar listas de listas
+        y_flat = []
+        for item in y:
+            if isinstance(item, list):
+                y_flat.extend(item)  # Si es lista, extraer elementos
+            else:
+                y_flat.append(item)  # Si es número, agregar directamente
+        
+        # Verificar que tenemos el mismo número de predicciones y valores reales
+        if len(predictions) != len(y_flat):
+            print(f"[WARNING] Longitudes diferentes: predicciones={len(predictions)}, y_real={len(y_flat)}")
+            min_len = min(len(predictions), len(y_flat))
+            predictions = predictions[:min_len]
+            y_flat = y_flat[:min_len]
+        
         # Calcular R^2
-        mean_y = sum(y) / len(y)
-        ss_total = sum((yi - mean_y) ** 2 for yi in y)
-        ss_residual = sum((yi - pred) ** 2 for yi, pred in zip(y, predictions))
+        if len(y_flat) == 0:
+            return 0
+        
+        mean_y = sum(y_flat) / len(y_flat)
+        ss_total = sum((yi - mean_y) ** 2 for yi in y_flat)
+        ss_residual = sum((yi - pred) ** 2 for yi, pred in zip(y_flat, predictions))
         
         if ss_total == 0:
             return 0  # Para evitar división por cero
         
         r2 = 1 - (ss_residual / ss_total)
         return r2
+
 
 class MyDecisionTree:
     def __init__(self, max_depth=10):
@@ -999,8 +1218,32 @@ class MyDecisionTree:
         distances = []
         
         for i, x in enumerate(self._X):
-            # Distancia euclidiana
-            dist = sum((a - b) ** 2 for a, b in zip(sample, x)) ** 0.5
+            # Calcular distancia con manejo seguro de tipos
+            dist = 0
+            for a, b in zip(sample, x):
+                try:
+                    # Para tipos numéricos, usar distancia euclidiana normal
+                    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                        dist += (a - b) ** 2
+                    # Para objetos datetime, usar la diferencia en segundos
+                    elif isinstance(a, datetime.datetime) and isinstance(b, datetime.datetime):
+                        diff_seconds = abs((a - b).total_seconds())
+                        dist += diff_seconds ** 2
+                    # Para objetos date, convertir a datetime y calcular diferencia
+                    elif isinstance(a, datetime.date) and isinstance(b, datetime.date):
+                        a_dt = datetime.datetime.combine(a, datetime.time.min)
+                        b_dt = datetime.datetime.combine(b, datetime.time.min)
+                        diff_seconds = abs((a_dt - b_dt).total_seconds())
+                        dist += diff_seconds ** 2
+                    # Para otros tipos, usar una distancia binaria (iguales o diferentes)
+                    else:
+                        dist += 0 if a == b else 1
+                except Exception as e:
+                    # En caso de error, usar una distancia predeterminada alta
+                    print(f"[WARNING] Error calculando distancia entre {type(a)} y {type(b)}: {e}")
+                    dist += 100  # Valor arbitrario alto
+            
+            dist = dist ** 0.5  # Raíz cuadrada para completar la distancia euclidiana
             distances.append((dist, i))
         
         # Ordenar por distancia
